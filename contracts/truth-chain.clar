@@ -1,4 +1,4 @@
-;; TrustChain: Decentralized Identity & Credential Verification Protocol
+;; TruthBlockn: Decentralized Identity & Credential Verification Protocol
 
 ;; Error Constants
 (define-constant contract-owner tx-sender)
@@ -277,5 +277,180 @@
         )
         
         (ok current-credential-count)
+    )
+)
+
+;; Revoke Credential
+(define-public (revoke-identity-credential 
+    (identity-id uint)
+    (credential-id uint)
+    (revocation-reason (string-ascii 100)))
+    (let
+        (
+            (identity-data (unwrap! (map-get? TrustChainIdentityDetails { identity-id: identity-id }) ERR-IDENTITY-NOT-FOUND))
+            (credential-data (unwrap! (map-get? TrustChainCredentialDetails { identity-id: identity-id, credential-id: credential-id }) ERR-CREDENTIAL-NOT-FOUND))
+        )
+        (asserts! (var-get contract-active) ERR-CONTRACT-NOT-ACTIVE)
+        (asserts! (is-valid-identity-id identity-id) ERR-IDENTITY-NOT-FOUND)
+        (asserts! (is-valid-credential-id identity-id credential-id) ERR-CREDENTIAL-NOT-FOUND)
+        (asserts! (is-eq (get credential-issuer credential-data) tx-sender) ERR-UNAUTHORIZED-ACCESS)
+        (asserts! (get credential-status credential-data) ERR-REVOKED-CREDENTIAL)
+        (asserts! (is-valid-string revocation-reason) ERR-INVALID-DATA)
+        
+        ;; Update credential status
+        (map-set TrustChainCredentialDetails
+            { identity-id: identity-id, credential-id: credential-id }
+            (merge credential-data {
+                credential-status: false
+            })
+        )
+        
+        ;; Record revocation details
+        (map-set TrustChainRevocationRegistry
+            { identity-id: identity-id, credential-id: credential-id }
+            {
+                revocation-reason: revocation-reason,
+                revocation-date: block-height,
+                revocation-authority: tx-sender,
+                contest-status: false,
+                dispute-evidence: none
+            }
+        )
+        
+        ;; Update identity revocation count
+        (map-set TrustChainIdentityDetails
+            { identity-id: identity-id }
+            (merge identity-data {
+                revocation-count: (+ (get revocation-count identity-data) u1)
+            })
+        )
+        
+        (ok true)
+    )
+)
+
+;; Provide Identity Attestation
+(define-public (attest-to-identity 
+    (identity-id uint)
+    (attestation-weight uint)
+    (attestation-comment (string-ascii 100)))
+    (let
+        (
+            (identity-data (unwrap! (map-get? TrustChainIdentityDetails { identity-id: identity-id }) ERR-IDENTITY-NOT-FOUND))
+            (existing-attestation (map-get? TrustChainAttestationRegistry { identity-id: identity-id, attester-address: tx-sender }))
+        )
+        (asserts! (var-get contract-active) ERR-CONTRACT-NOT-ACTIVE)
+        (asserts! (is-valid-identity-id identity-id) ERR-IDENTITY-NOT-FOUND)
+        (asserts! (is-eq (get identity-status identity-data) "active") ERR-IDENTITY-INACTIVE)
+        (asserts! (is-none existing-attestation) ERR-ALREADY-ATTESTED)
+        (asserts! (>= (- (get expiration-block-height identity-data) block-height) (var-get attestation-period)) ERR-ATTESTATION-PERIOD-ENDED)
+        (asserts! (> attestation-weight u0) ERR-INVALID-FEE-AMOUNT)
+        (asserts! (is-valid-string attestation-comment) ERR-INVALID-DATA)
+        
+        ;; Process attestation fee
+        (try! (stx-transfer? attestation-weight tx-sender (as-contract tx-sender)))
+        
+        (map-set TrustChainAttestationRegistry
+            { identity-id: identity-id, attester-address: tx-sender }
+            {
+                attestation-weight: attestation-weight,
+                attestation-date: block-height,
+                attestation-comment: attestation-comment
+            }
+        )
+        
+        ;; Update identity trust score and attestation count
+        (map-set TrustChainIdentityDetails
+            { identity-id: identity-id }
+            (merge identity-data {
+                trust-score: (+ (get trust-score identity-data) attestation-weight),
+                attestation-count: (+ (get attestation-count identity-data) u1)
+            })
+        )
+        
+        (ok true)
+    )
+)
+
+;; Contest Credential Revocation
+(define-public (contest-credential-revocation 
+    (identity-id uint)
+    (credential-id uint)
+    (contest-evidence (buff 32)))
+    (let
+        (
+            (identity-data (unwrap! (map-get? TrustChainIdentityDetails { identity-id: identity-id }) ERR-IDENTITY-NOT-FOUND))
+            (credential-data (unwrap! (map-get? TrustChainCredentialDetails { identity-id: identity-id, credential-id: credential-id }) ERR-CREDENTIAL-NOT-FOUND))
+            (revocation-data (unwrap! (map-get? TrustChainRevocationRegistry { identity-id: identity-id, credential-id: credential-id }) ERR-CREDENTIAL-NOT-FOUND))
+        )
+        (asserts! (var-get contract-active) ERR-CONTRACT-NOT-ACTIVE)
+        (asserts! (is-valid-identity-id identity-id) ERR-IDENTITY-NOT-FOUND)
+        (asserts! (is-valid-credential-id identity-id credential-id) ERR-CREDENTIAL-NOT-FOUND)
+        (asserts! (is-eq (get identity-owner identity-data) tx-sender) ERR-UNAUTHORIZED-ACCESS)
+        (asserts! (not (get credential-status credential-data)) ERR-CREDENTIAL-ALREADY-VERIFIED)
+        
+        ;; Update revocation contest info
+        (map-set TrustChainRevocationRegistry
+            { identity-id: identity-id, credential-id: credential-id }
+            (merge revocation-data {
+                contest-status: true,
+                dispute-evidence: (some contest-evidence)
+            })
+        )
+        
+        (ok true)
+    )
+)
+
+;; Read-only Functions
+
+;; Get Identity Information
+(define-read-only (get-identity-details (identity-id uint))
+    (map-get? TrustChainIdentityDetails { identity-id: identity-id })
+)
+
+;; Get Credential Information
+(define-read-only (get-credential-details (identity-id uint) (credential-id uint))
+    (map-get? TrustChainCredentialDetails { identity-id: identity-id, credential-id: credential-id })
+)
+
+;; Get Attestation Details
+(define-read-only (get-attestation-details (identity-id uint) (attester-address principal))
+    (map-get? TrustChainAttestationRegistry { identity-id: identity-id, attester-address: attester-address })
+)
+
+;; Get Revocation Information
+(define-read-only (get-revocation-details (identity-id uint) (credential-id uint))
+    (map-get? TrustChainRevocationRegistry { identity-id: identity-id, credential-id: credential-id })
+)
+
+;; Get Issuer Information
+(define-read-only (get-issuer-details (issuer-address principal))
+    (map-get? TrustChainIssuerRecord { issuer-address: issuer-address })
+)
+
+;; Get Identity Verification Status
+(define-read-only (check-identity-verification (identity-id uint))
+    (match (map-get? TrustChainIdentityDetails { identity-id: identity-id })
+        identity-data (ok {
+            verification-status: (get verification-status identity-data),
+            trust-score: (get trust-score identity-data),
+            attestation-count: (get attestation-count identity-data),
+            revocation-count: (get revocation-count identity-data)
+        })
+        ERR-IDENTITY-NOT-FOUND
+    )
+)
+
+;; Get Identity Trust Metrics
+(define-read-only (get-identity-trust-metrics (identity-id uint))
+    (match (map-get? TrustChainIdentityDetails { identity-id: identity-id })
+        identity-data (ok {
+            trust-level: (/ (get trust-score identity-data) (if (is-eq (get attestation-count identity-data) u0) u1 (get attestation-count identity-data))),
+            valid-credentials: (- (get credential-count identity-data) (get revocation-count identity-data)),
+            remaining-validity: (- (get expiration-block-height identity-data) block-height),
+            credential-issuer-count: (get credential-count identity-data)
+        })
+        ERR-IDENTITY-NOT-FOUND
     )
 )
