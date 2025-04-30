@@ -142,3 +142,140 @@
         (ok true)
     )
 )
+
+;; Update Registration Fee
+(define-public (update-registration-fee (new-fee-amount uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) ERR-NOT-AUTHORIZED-OWNER)
+        (asserts! (> new-fee-amount u0) ERR-INVALID-FEE-AMOUNT)
+        (var-set registration-fee new-fee-amount)
+        (ok true)
+    )
+)
+
+;; Register New Issuer
+(define-public (register-credential-issuer 
+    (issuer-name (string-ascii 50))
+    (issuer-category (string-ascii 20)))
+    (begin
+        (asserts! (var-get contract-active) ERR-CONTRACT-NOT-ACTIVE)
+        (asserts! (is-valid-string issuer-name) ERR-INVALID-DATA)
+        (asserts! (is-valid-string issuer-category) ERR-INVALID-DATA)
+        
+        ;; Process registration fee
+        (try! (stx-transfer? (var-get registration-fee) tx-sender (as-contract tx-sender)))
+        
+        (map-set TrustChainIssuerRecord
+            { issuer-address: tx-sender }
+            {
+                issuer-name: issuer-name,
+                issuer-category: issuer-category,
+                registration-date: block-height,
+                credentials-issued: u0,
+                issuer-trust-level: u1
+            }
+        )
+        (ok true)
+    )
+)
+
+;; Register New Digital Identity
+(define-public (register-digital-identity 
+    (identity-name (string-ascii 50))
+    (identity-description (string-ascii 500))
+    (identity-public-key (buff 33))
+    (identity-metadata-url (string-ascii 100))
+    (identity-type (string-ascii 12))
+    (validity-period uint))
+    (let
+        (
+            (new-identity-id (+ (var-get identity-counter) u1))
+            (identity-expiration (+ block-height validity-period))
+        )
+        (asserts! (var-get contract-active) ERR-CONTRACT-NOT-ACTIVE)
+        (asserts! (is-valid-string identity-name) ERR-INVALID-DATA)
+        (asserts! (is-valid-string identity-description) ERR-INVALID-DATA)
+        (asserts! (is-valid-string identity-metadata-url) ERR-INVALID-DATA)
+        (asserts! (is-valid-credential-type identity-type) ERR-INVALID-DATA)
+        (asserts! (> validity-period u0) ERR-INVALID-TIME)
+        
+        ;; Process registration fee
+        (try! (stx-transfer? (var-get registration-fee) tx-sender (as-contract tx-sender)))
+        
+        (map-set TrustChainIdentityDetails
+            { identity-id: new-identity-id }
+            {
+                identity-owner: tx-sender,
+                identity-name: identity-name,
+                identity-description: identity-description,
+                identity-public-key: identity-public-key,
+                identity-metadata-url: identity-metadata-url,
+                identity-type: identity-type,
+                credential-count: u0,
+                trust-score: u0,
+                identity-status: "active",
+                verification-status: false,
+                creation-block-height: block-height,
+                expiration-block-height: identity-expiration,
+                attestation-count: u0,
+                revocation-count: u0
+            }
+        )
+        (var-set identity-counter new-identity-id)
+        (var-set active-identities (+ (var-get active-identities) u1))
+        (ok new-identity-id)
+    )
+)
+
+;; Issue New Credential
+(define-public (issue-identity-credential 
+    (identity-id uint)
+    (credential-title (string-ascii 100))
+    (credential-description (string-ascii 200))
+    (credential-hash (buff 32))
+    (validity-period uint))
+    (let
+        (
+            (identity-data (unwrap! (map-get? TrustChainIdentityDetails { identity-id: identity-id }) ERR-IDENTITY-NOT-FOUND))
+            (issuer-data (unwrap! (map-get? TrustChainIssuerRecord { issuer-address: tx-sender }) ERR-ISSUER-NOT-REGISTERED))
+            (current-credential-count (get credential-count identity-data))
+            (expiration-height (+ block-height validity-period))
+        )
+        (asserts! (var-get contract-active) ERR-CONTRACT-NOT-ACTIVE)
+        (asserts! (is-valid-identity-id identity-id) ERR-IDENTITY-NOT-FOUND)
+        (asserts! (is-valid-string credential-title) ERR-INVALID-DATA)
+        (asserts! (is-valid-string credential-description) ERR-INVALID-DATA)
+        (asserts! (> validity-period u0) ERR-INVALID-TIME)
+        
+        (map-set TrustChainCredentialDetails
+            { identity-id: identity-id, credential-id: current-credential-count }
+            {
+                credential-title: credential-title,
+                credential-description: credential-description,
+                issuance-date: block-height,
+                expiration-date: expiration-height,
+                credential-status: true,
+                credential-hash: credential-hash,
+                credential-issuer: tx-sender
+            }
+        )
+        
+        ;; Update identity record
+        (map-set TrustChainIdentityDetails
+            { identity-id: identity-id }
+            (merge identity-data {
+                credential-count: (+ current-credential-count u1)
+            })
+        )
+        
+        ;; Update issuer record
+        (map-set TrustChainIssuerRecord
+            { issuer-address: tx-sender }
+            (merge issuer-data {
+                credentials-issued: (+ (get credentials-issued issuer-data) u1)
+            })
+        )
+        
+        (ok current-credential-count)
+    )
+)
